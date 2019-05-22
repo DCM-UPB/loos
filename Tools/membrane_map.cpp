@@ -1,5 +1,5 @@
 /*
- *  Compute membrane property distribution about a protein 
+ *  Compute membrane property distribution about a protein
  *  Can compute chain molecular order parameter, tilt vector, or density
  *
  *  Alan Grossfield
@@ -44,7 +44,7 @@ enum CalcType { DENSITY, ORDER, HEIGHT, VECTOR };
 class ToolOptions: public opts::OptionsPackage
 {
 public:
-    void addGeneric(po::options_description& o) 
+    void addGeneric(po::options_description& o)
         {
         o.add_options()
             ("xmin", po::value<double>(&xmin)->default_value(-50), "x histogram range")
@@ -57,10 +57,12 @@ public:
             ("upper-only", "Map only the upper leaflet")
             ("lower-only", "Map only the lower leaflet")
             ("ref-structure", po::value<string>(&reference_filename), "Align to an external structure instead of the first frame")
+            ("target-selection", po::value<string>(&target_selection), "Selection to use to calculate property")
+            ("align-selection", po::value<string>(&align_selection), "Selection used to align the system")
             ;
         }
 
-    bool postConditions(po::variables_map& vm) 
+    bool postConditions(po::variables_map& vm)
         {
         if (calc_type.compare(string("density"))==0)
             {
@@ -78,7 +80,7 @@ public:
             {
             type = VECTOR;
             }
-        else 
+        else
             {
             cerr << "Error: unknown calculation type '" << calc_type
                  << "' (must be density, height, order, or vector)"
@@ -102,6 +104,15 @@ public:
                  << endl;
             exit(-1);
             }
+
+        if (vm.count("align_selection"))
+            {
+            has_align = true;
+            }
+        else
+            {
+            has_align = false;
+            }
         return(true);
         }
 
@@ -109,15 +120,18 @@ public:
     uint xbins, ybins;
     string calc_type;
     string reference_filename;
+    string align_selection;
+    string target_selection;
     CalcType type;
     bool upper_only;
     bool lower_only;
+    bool has_align;
 };
 
 
 string fullHelpMessage(void)
     {
-    string msg = 
+    string msg =
 "\n"
 "SYNOPSIS\n"
 "\n"
@@ -237,8 +251,6 @@ int main(int argc, char *argv[])
     opts::BasicSplitBy *sopts = new opts::BasicSplitBy;
     opts::RequiredArguments* ropts = new opts::RequiredArguments;
     ToolOptions* topts = new ToolOptions;
-    ropts->addArgument("align-selection", "selection to align on");
-    ropts->addArgument("target-selection", "selection to calculate with");
 
     opts::AggregateOptions options;
     options.add(bopts).add(tropts).add(ropts).add(topts).add(sopts);
@@ -253,25 +265,30 @@ int main(int argc, char *argv[])
     traj->readFrame(frames[0]);
     traj->updateGroupCoords(system);
 
-    AtomicGroup align_to = selectAtoms(system, ropts->value("align-selection"));
 
+
+    AtomicGroup align_to;
     AtomicGroup reference;
-    if ((topts->reference_filename).length() > 0)
+    if (topts->has_align)
         {
-        AtomicGroup reference_system = createSystem(topts->reference_filename);
-        reference = selectAtoms(reference_system, ropts->value("align-selection"));
-        }
-    else
-        {
-        reference = align_to.copy();
+        align_to = selectAtoms(system, topts->align_selection);
+        if ((topts->reference_filename).length() > 0)
+            {
+            AtomicGroup reference_system = createSystem(topts->reference_filename);
+            reference = selectAtoms(reference_system, topts->align_selection);
+            }
+        else
+            {
+            reference = align_to.copy();
+            }
         }
 
-    AtomicGroup apply_to = selectAtoms(system, ropts->value("target-selection"));
+    AtomicGroup apply_to = selectAtoms(system, topts->target_selection);
 
     vector<AtomicGroup> targets = sopts->split(apply_to);
     cout << "# Found " << targets.size() << " matching molecules" << endl;
 
-    // Set up storage for our property. 
+    // Set up storage for our property.
     double xmin = topts->xmin;
     double xmax = topts->xmax;
     double ymin = topts->ymin;
@@ -301,9 +318,9 @@ int main(int argc, char *argv[])
             exit(-1);
         }
 
-    // We don't want the transformation to tilt the membrane, so we'll 
-    // zero out the z coordinates before using the alignment. 
-    // We'll do the same 
+    // We don't want the transformation to tilt the membrane, so we'll
+    // zero out the z coordinates before using the alignment.
+    // We'll do the same
     for (AtomicGroup::iterator i = reference.begin();
                                i!= reference.end();
                                ++i)
@@ -317,24 +334,26 @@ int main(int argc, char *argv[])
         traj->readFrame(frames[i]);
         traj->updateGroupCoords(system);
 
-        
-        // zero out the alignment selections z-coordinate
-        AtomicGroup align_to_flattened = align_to.copy();
-        for (AtomicGroup::iterator j = align_to_flattened.begin();
-                                   j!= align_to_flattened.end();
-                                   ++j)
+        if (topts->has_align)
             {
-            (*j)->coords().z() = 0.0;
+            // zero out the alignment selections z-coordinate
+            AtomicGroup align_to_flattened = align_to.copy();
+            for (AtomicGroup::iterator j = align_to_flattened.begin();
+                                       j!= align_to_flattened.end();
+                                       ++j)
+                {
+                (*j)->coords().z() = 0.0;
+                }
+
+
+            // get the alignment matrix
+            GMatrix M = align_to_flattened.superposition(reference);
+            M(2,2) = 1.0;    // Fix a problem caused by zapping the z-coords...
+            XForm W(M);
+
+            // align the stuff we're goign to do the calculation on
+            apply_to.applyTransform(W);
             }
-
-
-        // get the alignment matrix
-        GMatrix M = align_to_flattened.superposition(reference);
-        M(2,2) = 1.0;    // Fix a problem caused by zapping the z-coords...
-        XForm W(M);
-  
-        // align the stuff we're goign to do the calculation on
-        apply_to.applyTransform(W);
 
         // Calculate something
         uint xbin, ybin;
@@ -345,19 +364,19 @@ int main(int argc, char *argv[])
             GCoord centroid = j->centroid();
             // Skip molecules outside the xy range of interest
             if ( (centroid.x() < xmin) || (centroid.x() > xmax) ||
-                 (centroid.y() < ymin) || (centroid.y() > ymax) 
+                 (centroid.y() < ymin) || (centroid.y() > ymax)
                )
                 {
                 continue;
                 }
-            // If the user chose to look at only one leaflet, 
+            // If the user chose to look at only one leaflet,
             // skip molecules in the opposite leaflet.
             // Note: this assumes that the membrane is centered at z=0
             else if ((centroid.z() > 0) && topts->lower_only)
                 {
                 continue;
                 }
-            else if ((centroid.z() < 0) && topts->upper_only) 
+            else if ((centroid.z() < 0) && topts->upper_only)
                 {
                 continue;
                 }
